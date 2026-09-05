@@ -1,0 +1,60 @@
+--- a/src/sed/mod.rs
++++ b/src/sed/mod.rs
+@@ -27,6 +27,7 @@
+ use clap::{Arg, ArgMatches, Command, arg};
+ use std::collections::HashMap;
+ use std::env;
++use std::ffi::OsString;
+ use std::path::PathBuf;
+ use uucore::error::{UResult, USimpleError, UUsageError};
+ use uucore::format_usage;
+@@ -37,7 +38,7 @@
+ 
+ #[uucore::main]
+ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+-    let matches = uu_app().try_get_matches_from(args)?;
++    let matches = uu_app().try_get_matches_from(gnu_in_place_args(args))?;
+ 
+     // Don't use arg_required_else_help when declaring command
+     // as it exits with code 2 and we use it to check
+@@ -56,6 +57,30 @@
+ }
+ 
+ #[allow(clippy::cognitive_complexity)]
++/// GNU sed only accepts an in-place backup suffix attached to `-i`, so a
++/// separate following argument is the script, never a suffix. Rewrite
++/// `-iSUFFIX` to `-i=SUFFIX`; together with `require_equals` this keeps clap
++/// from consuming the next argument after a bare `-i`.
++fn gnu_in_place_args(args: impl Iterator<Item = OsString>) -> Vec<OsString> {
++    let mut options_done = false;
++    args.map(|arg| {
++        if options_done {
++            return arg;
++        }
++        match arg.to_str() {
++            Some("--") => {
++                options_done = true;
++                arg
++            }
++            Some(s) if s.len() > 2 && s.starts_with("-i") && !s.starts_with("-i=") => {
++                OsString::from(format!("-i={}", &s[2..]))
++            }
++            _ => arg,
++        }
++    })
++    .collect()
++}
++
+ pub fn uu_app() -> Command {
+     #[cfg(windows)]
+     let util_name = "sed";
+@@ -105,7 +130,8 @@
+                 .long("in-place")
+                 .help("Edit files in place, making a backup if SUFFIX is supplied.")
+                 .num_args(0..=1)
+-                .default_missing_value(""),
++                .default_missing_value("")
++                .require_equals(true),
+             // Access with .get_one::<u32>("line-length")
+             arg!(-l --length <NUM> "Specify the 'l' command line-wrap length.")
+                 .value_parser(clap::value_parser!(u32)),

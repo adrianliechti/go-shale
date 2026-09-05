@@ -1,0 +1,16 @@
+--- a/src/bin/coreutils.rs
++++ b/src/bin/coreutils.rs
+@@ -50,6 +50,13 @@
+ 
+ #[allow(clippy::cognitive_complexity)]
+ fn main() {
++    #[cfg(target_os = "wasi")]
++    if let Some(cwd) = std::env::var_os("SHALE_CWD") {
++        if let Err(err) = std::env::set_current_dir(&cwd) {
++            let _ = writeln!(io::stderr(), "coreutils: cannot set working directory: {err}");
++            exit(1);
++        }
++    }
+     let utils = util_map();
+     let mut args = uucore::args_os();
+ 

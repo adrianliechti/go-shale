@@ -1,0 +1,76 @@
+--- a/src/cmp.rs
++++ b/src/cmp.rs
+@@ -11,10 +11,10 @@
+ use std::process::ExitCode;
+ use std::{cmp, fs, io};
+ 
+-#[cfg(not(target_os = "windows"))]
++#[cfg(not(any(target_os = "windows", target_os = "wasi")))]
+ use std::os::fd::{AsRawFd, FromRawFd};
+ 
+-#[cfg(not(target_os = "windows"))]
++#[cfg(not(any(target_os = "windows", target_os = "wasi")))]
+ use std::os::unix::fs::MetadataExt;
+ 
+ #[cfg(target_os = "windows")]
+@@ -38,7 +38,13 @@
+     format!("Usage: {executable} <from> <to>")
+ }
+ 
+-#[cfg(not(target_os = "windows"))]
++#[cfg(target_os = "wasi")]
++fn is_stdout_dev_null() -> bool {
++    // WASI exposes neither /dev/null identity nor raw descriptors for stdout.
++    false
++}
++
++#[cfg(not(any(target_os = "windows", target_os = "wasi")))]
+ fn is_stdout_dev_null() -> bool {
+     let Ok(dev_null) = fs::metadata("/dev/null") else {
+         return false;
+@@ -330,7 +336,7 @@
+ 
+     if let (Ok(a_meta), Ok(b_meta)) = (fs::metadata(&params.from), fs::metadata(&params.to)) {
+         #[cfg(not(target_os = "windows"))]
+-        let (a_size, b_size) = (a_meta.size(), b_meta.size());
++        let (a_size, b_size) = (a_meta.len(), b_meta.len());
+ 
+         #[cfg(target_os = "windows")]
+         let (a_size, b_size) = (a_meta.file_size(), b_meta.file_size());
+--- a/src/utils.rs
++++ b/src/utils.rs
+@@ -63,10 +63,30 @@
+         .and_then(|m| m.modified())
+         .unwrap_or(SystemTime::now());
+ 
+-    let modification_time: DateTime<Local> = modification_time.into();
+-    let modification_time: String = modification_time
+-        .format("%Y-%m-%d %H:%M:%S%.9f %z")
+-        .to_string();
++    // On WASI, chrono's local zone is unavailable and its `%M` formatter
++    // produces garbage on wasm32, so format the UTC fields directly.
++    #[cfg(target_os = "wasi")]
++    let modification_time: String = {
++        use chrono::{Datelike, Timelike, Utc};
++        let t: DateTime<Utc> = modification_time.into();
++        format!(
++            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:09} +0000",
++            t.year(),
++            t.month(),
++            t.day(),
++            t.hour(),
++            t.minute(),
++            t.second(),
++            t.nanosecond()
++        )
++    };
++    #[cfg(not(target_os = "wasi"))]
++    let modification_time: String = {
++        let modification_time: DateTime<Local> = modification_time.into();
++        modification_time
++            .format("%Y-%m-%d %H:%M:%S%.9f %z")
++            .to_string()
++    };
+ 
+     modification_time
+ }
