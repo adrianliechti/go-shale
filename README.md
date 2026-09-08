@@ -1,6 +1,6 @@
 # Shale
 
-A Go-owned virtual shell with **uutils coreutils, grep, find, diff, and sed
+A Go-owned virtual shell with **uutils coreutils, grep, find, diff, sed, and ripgrep
 running in WebAssembly**. Package: `shale`. Command: `cmd/shale`.
 
 The shell creates its own filesystem layout. Mount ordinary Go `fs.FS` values
@@ -9,7 +9,7 @@ read-only, or use `vfs.WriteFS` for read-write access. Mounts do not need to be 
 
 ```text
 /
-├── bin/          read-only uutils commands
+├── bin/          read-only registered commands
 ├── usr/bin/      the same commands
 ├── tmp/          writable, in-memory scratch space
 ├── work/         default working directory for the Go API
@@ -18,9 +18,10 @@ read-only, or use `vfs.WriteFS` for read-write access. Mounts do not need to be 
 ```
 
 `cat`, `/bin/cat`, and `/usr/bin/cat` invoke the embedded WASM command.
-`PATH` defaults to `/usr/bin:/bin`. The command files expose the actual multicall
-WASM bytes, shared in memory, with mode `0555`. These directories are reserved;
-commands cannot be replaced and arbitrary mounted executables are not run.
+`PATH` defaults to `/usr/bin:/bin`. The command files expose the actual embedded
+WASM bytes, shared in memory, with mode `0555`. Custom Go commands expose empty
+files with the same mode. These directories are reserved; commands cannot be
+replaced and arbitrary mounted executables are not run.
 
 ## Try it
 
@@ -32,6 +33,7 @@ go run ./cmd/shale
 go run ./cmd/shale -c 'pwd; ls /bin'
 go run ./cmd/shale -c 'printf "pear\napple\npear\n" | sort | uniq > result.txt; cat result.txt'
 go run ./cmd/shale -root ./some-directory -readonly -c 'grep -rn TODO . | head -n 5'
+go run ./cmd/shale -root ./some-directory -readonly -c 'rg -n TODO -g "*.go"'
 go run ./cmd/shale -c 'find . -name "*.txt" | xargs sed -i "s/pear/plum/"; diff -u result.txt /dev/null'
 go build ./cmd/shale
 ```
@@ -108,19 +110,63 @@ shell are serialized. `Run(ctx, Request{Script: ..., Stdin: ...})` supplies stdi
 `ReadFile` retrieves a guest file. `Result.Exited` tells interactive callers that
 the script requested `exit`; the API session remains reusable.
 
+### Custom Go commands
+
+Register virtual commands with `Options.Commands`. The shell resolves them
+through `PATH`, `/bin`, or `/usr/bin` and supplies expanded arguments, exported
+environment variables, cwd, and redirected streams:
+
+```go
+sh, err := shale.New(ctx, shale.Options{
+    Commands: map[string]shale.CommandFunc{
+        "hello": func(ctx context.Context, cmd *shale.Command) (int, error) {
+            _, err := fmt.Fprintln(cmd.Stdout, "hello from Go")
+            return 0, err
+        },
+    },
+})
+// After checking err and arranging sh.Close(ctx):
+result, err := sh.Exec(ctx, "hello | tr a-z A-Z")
+```
+
+[`Command`](command.go) also provides a live `vfs.WriteFS` view rooted at the
+shell's `/`. Names use `io/fs` conventions, for example `work/file.txt`.
+Handlers can read with `fs.ReadFile` and mutate files through `OpenFile`,
+`Mkdir`, `Rename`, and `Remove`. `OpenFile` accepts the usual `os.O_*` flags.
+Writes follow the shell's mount permissions and filesystem limits; plain
+`fs.FS` mounts and mounts marked `ReadOnly` remain read-only.
+
+Return a nonzero status with a nil error for a command failure; return an error
+to abort execution. Handlers must support concurrent pipeline invocations,
+respect context cancellation, and finish their I/O before returning. They must
+not call methods on the executing shell, which holds its session lock. The
+caller owns handler resources and closes them after closing the shell.
+
+Custom commands cannot replace embedded commands or builtins. `New` copies the
+registration map; `ls /bin` includes the session's custom commands, while
+`shale.Commands()` lists only the embedded inventory.
+
+[`examples/python`](examples/python) registers virtual `python` and `python3`
+commands using [go-pyodide](https://github.com/adrianliechti/go-pyodide). It shows
+pipelines, script files, arguments, exit codes, and access to shell files. Its
+separate Go module uses the sibling `../go-pyodide` checkout, keeping CPython
+out of ordinary Shale builds. Python reads shell files through its read-only
+mount API; shell redirection saves its output to writable mounts.
+
 ## Compatibility
 
 This is an initial implementation, **not full Bash or a complete POSIX/GNU
 conformance claim**. Shell syntax and expansion come from `mvdan.cc/sh/v3`;
 execution is our own Go implementation, not its host-executing interpreter.
-The command implementations come from the uutils projects
+The command implementations come from
 [coreutils 0.11.0](https://github.com/uutils/coreutils/tree/0.11.0),
 [grep 0.2.0](https://github.com/uutils/grep/tree/0.2.0),
 [findutils 0.10.0](https://github.com/uutils/findutils/tree/0.10.0),
-[diffutils v0.5.0](https://github.com/uutils/diffutils/tree/v0.5.0), and
-[sed 0.2.0](https://github.com/uutils/sed/tree/0.2.0). grep and sed are early
-upstream releases; see [the artifact notes](internal/wasm/README.md) for the
-local patches applied to diffutils and sed.
+[diffutils v0.5.0](https://github.com/uutils/diffutils/tree/v0.5.0),
+[sed 0.2.0](https://github.com/uutils/sed/tree/0.2.0), and
+[ripgrep 15.2.0](https://github.com/BurntSushi/ripgrep/tree/15.2.0). grep and sed
+are early upstream releases; see [the artifact notes](internal/wasm/README.md) for the
+local patches applied to diffutils, sed, and ripgrep.
 
 Supported shell features include quoting, variables and exports, parameter and
 arithmetic expansion, command substitution, globs, pipelines, `&&`/`||`, ordinary
@@ -134,11 +180,18 @@ shell options such as `set -e`/`pipefail`, external scripts, or arbitrary native
 or WASM executables. Unsupported constructs return an error.
 
 The pinned coreutils `feat_wasm` build contains 77 utilities; `coreutils --list`
-prints them. The separate modules add `grep`, `find`, `diff`, `cmp`, and `sed`.
-`shale.Commands()` lists every command and `shale.Versions()` the pinned
+prints them. The separate modules add `grep`, `find`, `diff`, `cmp`, `sed`, and `rg`.
+`shale.Commands()` lists the embedded commands and `shale.Versions()` the pinned
 releases. Not all native coreutils are available in the WASI build (for
 example, `chmod` and `stat` are absent), and `awk` is absent because the uutils
 implementation has no release yet.
+
+`rg` supports recursive searches, ignore rules, globs, `--files`, `--json`, and
+piped input. Its WASI build always runs on one thread, including when `-j` is
+supplied. PCRE2 (`-P`) is not compiled in, and subprocess-based features such
+as `--pre` and compressed-file searches (`-z`) are unavailable. Shale supplies
+stdin state so `rg pattern` searches cwd by default and reads stdin when piped
+or redirected. Use `rg pattern -` to explicitly select even an empty stdin.
 
 `xargs` is a shell builtin rather than the findutils binary, because WASI
 cannot spawn processes: it supports `-0`, `-n N`, `-I R`, `-r`, `-t`, and `--`,
@@ -172,9 +225,12 @@ Important filesystem/WASI limitations:
 
 ## Boundaries and limits
 
-There is no host process execution, host environment inheritance, or network
-API. Only explicitly mounted backends are exposed. WASM commands get fresh
-instances, a fixed environment, real time, and a cryptographic random source.
+The built-in runtime has no host process execution, host environment inheritance,
+or network API. Only explicitly mounted backends are exposed. WASM commands get
+fresh instances, a fixed environment, real time, and a cryptographic random source.
+Custom command handlers are trusted Go code with the caller's host privileges;
+their runtimes and resource limits are the caller's responsibility. Captured
+output still uses the shell's output limit, and handlers receive its deadline.
 
 Defaults: 10 seconds per execution, 1 MiB combined stdout/stderr, 1 MiB script
 and stdin limits, 10,000 shell execution steps, and 128 MiB linear memory per

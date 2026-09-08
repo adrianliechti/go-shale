@@ -108,12 +108,12 @@ func TestShellIntegration(t *testing.T) {
 		t.Fatalf("coreutils --list: %#v, %v", r, err)
 	}
 	all := shale.Commands()
-	for _, c := range append(strings.Fields(r.Stdout), "coreutils", "grep", "find", "diff", "cmp", "sed") {
+	for _, c := range append(strings.Fields(r.Stdout), "coreutils", "grep", "find", "diff", "cmp", "sed", "rg") {
 		if !slices.Contains(all, c) {
 			t.Fatalf("command inventory lacks %s: %q", c, all)
 		}
 	}
-	if v := shale.Versions(); v["coreutils"] != shale.CoreutilsVersion || v["grep"] == "" || v["findutils"] == "" || v["diffutils"] == "" || v["sed"] == "" {
+	if v := shale.Versions(); v["coreutils"] != shale.CoreutilsVersion || v["grep"] == "" || v["findutils"] == "" || v["diffutils"] == "" || v["sed"] == "" || v["ripgrep"] != "15.2.0" {
 		t.Fatalf("versions: %v", v)
 	}
 	r, err = b.Run(ctx, shale.Request{Script: "cat | tr a-z A-Z", Stdin: "hello\n"})

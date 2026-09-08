@@ -8,10 +8,14 @@ import (
 	"time"
 )
 
-// FS exposes every embedded executable under each of its command names, without
-// duplicating bytes. The shell only dispatches these registered paths, not
-// arbitrary WASM.
-func FS() fs.FS { return commandFS{Commands()} }
+// FS exposes every embedded executable without duplicating bytes. Additional
+// Go command names have empty executable files; their handlers live in Go.
+// Callers must validate that extra names are unique and do not shadow WASM.
+func FS(extra ...string) fs.FS {
+	names := append(Commands(), extra...)
+	sort.Strings(names)
+	return commandFS{names}
+}
 
 type commandFS struct{ names []string }
 
@@ -27,7 +31,11 @@ func (f commandFS) Open(name string) (fs.File, error) {
 		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrNotExist}
 	}
 	m := Lookup(name)
-	return &commandFile{info: commandInfo{name, m}, Reader: bytes.NewReader(m.Wasm)}, nil
+	var data []byte
+	if m != nil {
+		data = m.Wasm
+	}
+	return &commandFile{info: commandInfo{name, m}, Reader: bytes.NewReader(data)}, nil
 }
 
 type commandInfo struct {
@@ -37,7 +45,7 @@ type commandInfo struct {
 
 func (i commandInfo) Name() string { return i.name }
 func (i commandInfo) Size() int64 {
-	if i.IsDir() {
+	if i.module == nil {
 		return 0
 	}
 	return int64(len(i.module.Wasm))

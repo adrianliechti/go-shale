@@ -1,5 +1,5 @@
-// Package shale embeds uutils coreutils, grep, find, diff, and sed in a virtual
-// shell with Go filesystem mounts.
+// Package shale embeds uutils coreutils, grep, find, diff, sed, and ripgrep in a
+// virtual shell with Go filesystem mounts and custom Go commands.
 package shale
 
 import (
@@ -10,8 +10,10 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"math"
 	"path"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -38,6 +40,9 @@ type Options struct {
 	Mounts []Mount
 	Cwd    string
 	Env    map[string]string
+	// Commands registers Go handlers in /bin and /usr/bin. Names cannot replace
+	// embedded commands or shell builtins. New copies the map.
+	Commands map[string]CommandFunc
 	// Zero values use the defaults below. Negative limits are invalid.
 	Timeout          time.Duration // default 10 seconds per execution
 	MaxOutputBytes   int           // default 1 MiB across stdout and stderr
@@ -56,13 +61,14 @@ type Request struct{ Script, Stdin string }
 // Shell is a persistent shell session. Files, variables, functions, and cwd are
 // retained between executions. Calls are serialized; pipeline stages run concurrently.
 type Shell struct {
-	gate    chan struct{}
-	runtime wazero.Runtime
-	modules map[string]*module
-	fs      *fsys.Namespace
-	shell   *shell.Shell
-	opts    Options
-	closed  bool
+	gate     chan struct{}
+	runtime  wazero.Runtime
+	modules  map[string]*module
+	fs       *fsys.Namespace
+	shell    *shell.Shell
+	opts     Options
+	closed   bool
+	commands map[string]CommandFunc
 }
 
 // module is an embedded executable compiled on first use, so that a session
@@ -127,7 +133,18 @@ func New(ctx context.Context, opts Options) (*Shell, error) {
 			return nil, errors.New("invalid environment entry")
 		}
 	}
-	commands := wasm.FS()
+	handlers := maps.Clone(opts.Commands)
+	var names []string
+	for name, handler := range handlers {
+		if !fs.ValidPath(name) || name == "." || strings.ContainsAny(name, "/\\\x00") || handler == nil {
+			return nil, fmt.Errorf("invalid custom command: %q", name)
+		}
+		if wasm.Lookup(name) != nil || shell.IsBuiltin(name) {
+			return nil, fmt.Errorf("command already registered: %q", name)
+		}
+		names = append(names, name)
+	}
+	commands := wasm.FS(names...)
 	mounts := []fsys.Mount{{Path: "/bin", FS: commands, ReadOnly: true}, {Path: "/usr/bin", FS: commands, ReadOnly: true}}
 	for _, m := range opts.Mounts {
 		mounts = append(mounts, fsys.Mount{Path: m.Path, FS: m.FS, ReadOnly: m.ReadOnly})
@@ -148,7 +165,7 @@ func New(ctx context.Context, opts Options) (*Shell, error) {
 		wr.Close(ctx)
 		return nil, e
 	}
-	s := &Shell{gate: make(chan struct{}, 1), runtime: wr, modules: make(map[string]*module), fs: n, opts: opts}
+	s := &Shell{gate: make(chan struct{}, 1), runtime: wr, modules: make(map[string]*module), fs: n, opts: opts, commands: handlers}
 	for _, def := range wasm.Modules {
 		s.modules[def.Name] = &module{def: def}
 	}
@@ -206,7 +223,7 @@ func (s *Shell) Run(ctx context.Context, req Request) (Result, error) {
 		return Result{}, shell.ErrLimit
 	}
 	output := &capture{remaining: s.opts.MaxOutputBytes, cancel: cancel}
-	code, e := s.shell.Run(ctx, req.Script, shell.IO{In: strings.NewReader(req.Stdin), Out: captureWriter{output, false}, Err: captureWriter{output, true}}, s.opts.MaxSteps)
+	code, e := s.shell.Run(ctx, req.Script, shell.IO{In: strings.NewReader(req.Stdin), Out: captureWriter{output, false}, Err: captureWriter{output, true}, InSet: req.Stdin != ""}, s.opts.MaxSteps)
 	if output.exceeded {
 		e = ErrOutputLimit
 		code = 1
@@ -243,13 +260,13 @@ func (s *Shell) ReadFile(ctx context.Context, name string) ([]byte, error) {
 	return b, e
 }
 
-// Commands lists the embedded uutils commands: the coreutils enabled by the
-// pinned WASI build plus grep, find, diff, cmp, and sed. The shell also
+// Commands lists the embedded commands: the coreutils enabled by the
+// pinned WASI build plus grep, find, diff, cmp, sed, and rg. The shell also
 // implements builtins such as cd, export, xargs, and exit. Listing is not a
 // promise that every option is supported by WASI or by every mounted filesystem.
 func Commands() []string { return wasm.Commands() }
 
-// Versions maps each embedded uutils project to its pinned release.
+// Versions maps each embedded project to its pinned release.
 func Versions() map[string]string {
 	v := make(map[string]string)
 	for _, m := range wasm.Modules {
@@ -259,6 +276,12 @@ func Versions() map[string]string {
 }
 
 func (s *Shell) command(ctx context.Context, cwd string, args []string, env map[string]string, streams shell.IO) (int, error) {
+	if handler := s.commands[args[0]]; handler != nil {
+		return handler(ctx, &Command{
+			Args: args, Cwd: cwd, Env: env, FS: commandFS{s.fs},
+			Stdin: streams.In, Stdout: streams.Out, Stderr: streams.Err,
+		})
+	}
 	def := wasm.Lookup(args[0])
 	if def == nil {
 		fmt.Fprintln(streams.Err, args[0]+": command not found")
@@ -282,6 +305,7 @@ func (s *Shell) command(ctx context.Context, cwd string, args []string, env map[
 		mc = mc.WithEnv(k, v)
 	}
 	mc = mc.WithEnv("SHALE_CWD", cwd)
+	mc = mc.WithEnv("SHALE_STDIN", strconv.FormatBool(streams.InSet))
 	mod, e := s.runtime.InstantiateModule(ctx, compiled, mc)
 	if mod != nil {
 		_ = mod.Close(ctx)

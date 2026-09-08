@@ -29,6 +29,8 @@ var ErrLimit = errors.New("shell execution limit exceeded")
 type IO struct {
 	In       io.Reader
 	Out, Err io.Writer
+	// InSet distinguishes a pipe or redirect from the default empty stdin.
+	InSet bool
 }
 type ExecFunc func(context.Context, string, []string, map[string]string, IO) (int, error)
 type Shell struct {
@@ -47,6 +49,16 @@ type run struct {
 	ctx      context.Context
 	steps    atomic.Int64
 	maxSteps int64
+}
+
+// IsBuiltin identifies names reserved by the shell, including the export
+// declaration handled by the parser instead of invoke.
+func IsBuiltin(name string) bool {
+	switch name {
+	case ":", "true", "false", "cd", "pwd", "export", "unset", "exit", "return", "break", "continue", "bash", "sh", "xargs":
+		return true
+	}
+	return false
 }
 
 func New(f *fsys.Namespace, cwd string, env map[string]string, exec ExecFunc) *Shell {
@@ -501,7 +513,7 @@ func (s *Shell) invoke(r *run, args []string, streams IO) (int, error) {
 }
 
 // external resolves a command through PATH or an explicit /bin path and runs
-// it as an embedded WASI executable.
+// it through the registered command handler.
 func (s *Shell) external(r *run, args []string, streams IO) (int, error) {
 	env := s.exported()
 	env["PWD"] = s.Cwd
@@ -739,7 +751,7 @@ func (s *Shell) pipeline(r *run, c *syntax.BinaryCmd, streams IO) (int, error) {
 	reader, writer := io.Pipe()
 	stop := context.AfterFunc(r.ctx, func() { reader.CloseWithError(r.ctx.Err()); writer.CloseWithError(r.ctx.Err()) })
 	defer stop()
-	leftIO := IO{streams.In, writer, streams.Err}
+	leftIO := IO{In: streams.In, Out: writer, Err: streams.Err, InSet: streams.InSet}
 	type result struct {
 		code int
 		err  error
@@ -752,7 +764,7 @@ func (s *Shell) pipeline(r *run, c *syntax.BinaryCmd, streams IO) (int, error) {
 		_ = writer.CloseWithError(e)
 		done <- result{code, e}
 	}()
-	code, e := right.stmt(r, c.Y, IO{reader, streams.Out, streams.Err})
+	code, e := right.stmt(r, c.Y, IO{In: reader, Out: streams.Out, Err: streams.Err, InSet: true})
 	e = pipelineFlow(e)
 	_ = reader.Close()
 	l := <-done
@@ -794,7 +806,7 @@ func (s *Shell) config(r *run, streams IO) *expand.Config {
 		child := s.clone()
 		child.depth++
 		out := &boundedWriter{w: w, left: maxExpansion}
-		code, e := child.list(r, c.Stmts, IO{streams.In, out, streams.Err})
+		code, e := child.list(r, c.Stmts, IO{In: streams.In, Out: out, Err: streams.Err, InSet: streams.InSet})
 		s.subStatus = code
 		if out.err != nil {
 			return out.err
@@ -938,6 +950,7 @@ func (s *Shell) redirect(r *run, redirs []*syntax.Redirect, streams IO) (IO, []i
 				return streams, closers, ErrLimit
 			}
 			streams.In = strings.NewReader(body)
+			streams.InSet = true
 			continue
 		}
 		if rd.Op == syntax.WordHdoc {
@@ -949,6 +962,7 @@ func (s *Shell) redirect(r *run, redirs []*syntax.Redirect, streams IO) (IO, []i
 				return streams, closers, ErrLimit
 			}
 			streams.In = strings.NewReader(text + "\n")
+			streams.InSet = true
 			continue
 		}
 		words, e := s.fields(r, []*syntax.Word{rd.Word}, streams)
@@ -982,6 +996,7 @@ func (s *Shell) redirect(r *run, redirs []*syntax.Redirect, streams IO) (IO, []i
 			continue
 		case syntax.WordHdoc:
 			streams.In = strings.NewReader(name + "\n")
+			streams.InSet = true
 			continue
 		}
 		flag := os.O_RDONLY
@@ -1004,6 +1019,7 @@ func (s *Shell) redirect(r *run, redirs []*syntax.Redirect, streams IO) (IO, []i
 				return streams, closers, errors.New("unsupported input descriptor")
 			}
 			streams.In = f
+			streams.InSet = true
 		} else {
 			w, ok := f.(io.Writer)
 			if !ok {

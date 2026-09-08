@@ -1,10 +1,10 @@
 #!/bin/sh
-# Rebuilds the checked-in WASM artifacts in internal/wasm from pinned uutils
+# Rebuilds the checked-in WASM artifacts in internal/wasm from pinned upstream
 # releases. Build dependencies are only needed to update those artifacts.
 #
 #   WASI_SDK_PATH=/path/to/wasi-sdk-33.0-<host> sh scripts/build-wasm.sh [project...]
 #
-# Projects: coreutils grep findutils diffutils sed (default: all).
+# Projects: coreutils grep findutils diffutils sed ripgrep (default: all).
 set -eu
 
 repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -38,7 +38,7 @@ build() {
   # tag: release tag; sha: SHA-256 of the GitHub source archive; patches: files in
   # scripts/patches; bin: cargo binary name; artifact: internal/wasm/<artifact>.wasm;
   # license: file in the source tree; features: extra cargo flags; cwd: patch or ctor.
-  patches='' features='' cwd=ctor
+  patches='' features='' cwd=ctor upstream="uutils/$project"
   case $project in
     coreutils)
       tag=0.11.0 sha=a47966117783bef18650cc724f1b1d061b717ac91a0feaabdd34910703cf70a4
@@ -56,12 +56,16 @@ build() {
     sed)
       tag=0.2.0 sha=a5a03b3871b963420d1408b11415c90d4d69df02ab4f2f82826b42899a61a87a
       patches=sed-in-place.patch bin=sed artifact=sed license=LICENSE dest=LICENSE-sed ;;
+    ripgrep)
+      upstream=BurntSushi/ripgrep
+      tag=15.2.0 sha=7605249d3eb0d5f170e3414498e3344e26b1e7a147aec518b57090b80036a562
+      patches=ripgrep-wasi.patch bin=rg artifact=rg license=LICENSE-MIT dest=LICENSE-ripgrep ;;
     *) echo "unknown project: $project" >&2; exit 1 ;;
   esac
 
   build_dir=$(mktemp -d "$repo_dir/.cache/$project-build.XXXXXX")
   echo "Building $project $tag in $build_dir (retained for inspection)"
-  curl -fL --retry 3 "https://github.com/uutils/$project/archive/refs/tags/$tag.tar.gz" -o "$build_dir/source.tar.gz"
+  curl -fL --retry 3 "https://github.com/$upstream/archive/refs/tags/$tag.tar.gz" -o "$build_dir/source.tar.gz"
   actual_sha=$(shasum -a 256 "$build_dir/source.tar.gz" | cut -d ' ' -f 1)
   if [ "$actual_sha" != "$sha" ]; then
     echo "$project: source archive checksum mismatch." >&2
@@ -88,7 +92,7 @@ build() {
 }
 
 if [ $# -eq 0 ]; then
-  set -- coreutils grep findutils diffutils sed
+  set -- coreutils grep findutils diffutils sed ripgrep
 fi
 for project in "$@"; do
   build "$project"

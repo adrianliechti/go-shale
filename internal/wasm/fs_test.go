@@ -13,10 +13,10 @@ import (
 
 func TestCommandFS(t *testing.T) {
 	f := FS()
-	if err := fstest.TestFS(f, "cat", "ls", "coreutils", "grep", "find", "diff", "cmp", "sed"); err != nil {
+	if err := fstest.TestFS(f, "cat", "ls", "coreutils", "grep", "find", "diff", "cmp", "sed", "rg"); err != nil {
 		t.Fatal(err)
 	}
-	for name, want := range map[string]*Module{"cat": Lookup("coreutils"), "[": Lookup("coreutils"), "diff": Lookup("cmp"), "grep": Lookup("grep")} {
+	for name, want := range map[string]*Module{"cat": Lookup("coreutils"), "[": Lookup("coreutils"), "diff": Lookup("cmp"), "grep": Lookup("grep"), "rg": Lookup("rg")} {
 		i, err := fs.Stat(f, name)
 		if err != nil || i.Mode().Perm() != 0555 || i.Size() != int64(len(want.Wasm)) {
 			t.Fatalf("%s metadata: %v, %v", name, i, err)
@@ -27,6 +27,21 @@ func TestCommandFS(t *testing.T) {
 	}
 	if !slices.IsSorted(Commands()) {
 		t.Fatal("commands must be sorted")
+	}
+}
+
+func TestCustomCommandFS(t *testing.T) {
+	f := FS("python", "python3")
+	i, err := fs.Stat(f, "python")
+	if err != nil || i.Mode().Perm() != 0555 || i.Size() != 0 {
+		t.Fatalf("custom command metadata: %v, %v", i, err)
+	}
+	b, err := fs.ReadFile(f, "python")
+	if err != nil || len(b) != 0 {
+		t.Fatalf("custom command contents: %q, %v", b, err)
+	}
+	if _, err := fs.Stat(FS(), "python"); !os.IsNotExist(err) {
+		t.Fatalf("custom command leaked to other sessions: %v", err)
 	}
 }
 

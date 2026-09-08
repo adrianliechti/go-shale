@@ -1,4 +1,4 @@
-# Embedded uutils artifacts
+# Embedded command artifacts
 
 Every executable is checked in, so ordinary Go consumers do not download or
 build Rust. Each `<artifact>.sha256` records its SHA-256 and is checked by tests.
@@ -11,8 +11,10 @@ Command aliases share the artifact bytes without copying them.
 | `find.wasm` | `find` | [uutils/findutils 0.10.0](https://github.com/uutils/findutils/tree/0.10.0) | `e36ae3937f889bc59cfbd65820a642baa695c58d7fa1e387e41857e710f40419` | ~1.6 MB |
 | `diffutils.wasm` | `diff`, `cmp` | [uutils/diffutils v0.5.0](https://github.com/uutils/diffutils/tree/v0.5.0) | `4c05d236ebddef7738446980a59cd13521b6990ea02242db6b32321dd93853ca` | ~1.1 MB |
 | `sed.wasm` | `sed` | [uutils/sed 0.2.0](https://github.com/uutils/sed/tree/0.2.0) | `a5a03b3871b963420d1408b11415c90d4d69df02ab4f2f82826b42899a61a87a` | ~1.5 MB |
+| `rg.wasm` | `rg` | [BurntSushi/ripgrep 15.2.0](https://github.com/BurntSushi/ripgrep/tree/15.2.0) | `7605249d3eb0d5f170e3414498e3344e26b1e7a147aec518b57090b80036a562` | ~2.9 MB |
 
-Source archives are `https://github.com/uutils/<project>/archive/refs/tags/<tag>.tar.gz`.
+Source archives are `https://github.com/<owner>/<project>/archive/refs/tags/<tag>.tar.gz`.
+The owner is `uutils` except for ripgrep (`BurntSushi`).
 
 Common build settings:
 
@@ -20,6 +22,7 @@ Common build settings:
   upstream `Cargo.lock` (`--locked`)
 - Release profile overrides: optimization `z`, strip `symbols`
 - coreutils only: no default features, `feat_wasm`, binary `coreutils`
+- ripgrep: binary `rg`, without its optional `pcre2` feature
 - C toolchain: [WASI SDK 33](https://github.com/WebAssembly/wasi-sdk/releases/tag/wasi-sdk-33)
   for the bundled Oniguruma in grep and findutils and for the constructor below
 - These artifacts were built on macOS arm64 with `wasi-sdk-33.0-arm64-macos.tar.gz`.
@@ -58,6 +61,14 @@ Relative-path and `cd` integration tests cover both mechanisms.
   `sed -i 's/a/b/' file` treated the script as a suffix. The patch rewrites
   `-iSUFFIX` to `-i=SUFFIX` and requires the equals form, matching GNU, where
   only an attached suffix counts.
+- [`ripgrep-wasi.patch`](../../scripts/patches/ripgrep-wasi.patch): WASI cannot
+  spawn threads, so all searches use the sequential walker, including explicit
+  `-j` requests. Native stdin introspection is unavailable for Go-backed streams;
+  ripgrep reads the host's `SHALE_STDIN` flag to choose stdin versus cwd. The host
+  sets this after exported variables, so shell assignments cannot spoof it.
+  The build script also avoids embedding the enclosing Shale Git revision when
+  ripgrep is built from a source archive. PCRE2 is not enabled, and options that
+  need subprocesses (`--pre`, `-z`) cannot operate in this runtime.
 
 Utility implementations are otherwise unchanged. These are locally patched
 builds, not unmodified upstream release binaries.
@@ -70,6 +81,7 @@ your build host. Run from the repository, optionally naming projects:
 ```sh
 WASI_SDK_PATH=/absolute/path/to/wasi-sdk-33.0-arm64-macos sh scripts/build-wasm.sh
 WASI_SDK_PATH=/absolute/path/to/wasi-sdk-33.0-arm64-macos sh scripts/build-wasm.sh grep sed
+WASI_SDK_PATH=/absolute/path/to/wasi-sdk-33.0-arm64-macos sh scripts/build-wasm.sh ripgrep
 go test ./...
 ```
 
@@ -82,9 +94,10 @@ module and command names in `embed.go`.
 
 ## Licenses
 
-All projects are MIT-licensed; diffutils is MIT OR Apache-2.0 and is used under
-MIT. Copyright and license texts are retained in [LICENSE](LICENSE) (coreutils),
+All projects offer the MIT license; diffutils is MIT OR Apache-2.0 and ripgrep is
+MIT OR Unlicense, both used under MIT. Copyright and license texts are retained in [LICENSE](LICENSE) (coreutils),
 [LICENSE-grep](LICENSE-grep), [LICENSE-findutils](LICENSE-findutils),
-[LICENSE-diffutils](LICENSE-diffutils), and [LICENSE-sed](LICENSE-sed). Rust
+[LICENSE-diffutils](LICENSE-diffutils), [LICENSE-sed](LICENSE-sed), and
+[LICENSE-ripgrep](LICENSE-ripgrep). Rust
 dependencies retain their own licenses; consult each pinned `Cargo.lock` and
 dependency when preparing a redistributed release.

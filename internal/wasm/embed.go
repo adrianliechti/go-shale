@@ -1,4 +1,4 @@
-// Package wasm contains the pinned uutils WASI executables and maps command
+// Package wasm contains the pinned WASI executables and maps command
 // names to the module that implements them.
 package wasm
 
@@ -23,13 +23,16 @@ var diffutils []byte
 //go:embed sed.wasm
 var sed []byte
 
+//go:embed rg.wasm
+var ripgrep []byte
+
 // Version is the pinned uutils coreutils release.
 const Version = "0.11.0"
 
 // Module is one embedded WASI executable and the commands it provides.
 type Module struct {
 	Name     string // artifact name; <Name>.wasm and <Name>.sha256 in this package
-	Project  string // upstream repository under github.com/uutils
+	Project  string // upstream project name, used as the Versions key
 	Version  string
 	Wasm     []byte
 	Commands []string
@@ -54,6 +57,7 @@ var Modules = []*Module{
 	{Name: "find", Project: "findutils", Version: "0.10.0", Wasm: find, Commands: []string{"find"}},
 	{Name: "diffutils", Project: "diffutils", Version: "0.5.0", Wasm: diffutils, Commands: []string{"cmp", "diff"}},
 	{Name: "sed", Project: "sed", Version: "0.2.0", Wasm: sed, Commands: []string{"sed"}},
+	{Name: "rg", Project: "ripgrep", Version: "15.2.0", Wasm: ripgrep, Commands: []string{"rg"}},
 }
 
 func sorted(names []string) []string {

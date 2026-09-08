@@ -1,0 +1,45 @@
+--- a/build.rs
++++ b/build.rs
+@@ -36,6 +36,12 @@
+ fn set_git_revision_hash() {
+     use std::process::Command;
+
++    // Release archives may be unpacked inside Shale's checkout. Do not embed
++    // the enclosing repository's revision as ripgrep's revision.
++    if !std::path::Path::new(".git").exists() {
++        return;
++    }
++
+     let args = &["rev-parse", "--short=10", "HEAD"];
+     let output = Command::new("git").args(args).output();
+     match output {
+--- a/crates/core/flags/hiargs.rs
++++ b/crates/core/flags/hiargs.rs
+@@ -165,7 +165,8 @@
+         };
+         let path_terminator = if low.null { Some(b'\x00') } else { None };
+         let quit_after_match = stats.is_none() && low.quiet;
+-        let threads = if low.sort.is_some() || paths.is_one_file {
++        // WASI preview 1 cannot spawn threads, even when -j is supplied.
++        let threads = if cfg!(target_os = "wasi") || low.sort.is_some() || paths.is_one_file {
+             1
+         } else if let Some(threads) = low.threads {
+             threads
+--- a/crates/cli/src/lib.rs
++++ b/crates/cli/src/lib.rs
+@@ -240,7 +240,14 @@
+         is_readable
+     }
+
+-    #[cfg(not(any(unix, windows)))]
++    // Shale's streams do not have native file-descriptor metadata. The host
++    // supplies this flag for pipes, redirects, and explicit request input.
++    #[cfg(target_os = "wasi")]
++    fn imp() -> bool {
++        std::env::var("SHALE_STDIN").as_deref() == Ok("true")
++    }
++
++    #[cfg(not(any(unix, windows, target_os = "wasi")))]
+     fn imp() -> bool {
+         log::debug!("on non-{{Unix,Windows}}, assuming stdin is not readable");
+         false
